@@ -1,16 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from "recharts";
 import {
   Search, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
-  Send, Bot, Zap, Target, Wallet, Shield, Activity,
+  Send, Bot, Zap, Target, Wallet, Shield, Activity, Trash2, History, Briefcase,
 } from "lucide-react";
 
 const CG = "https://api.coingecko.com/api/v3";
 const BN = "https://api.binance.com/api/v3";
-const QUICK = ["BTC", "ETH", "SOL", "BNB", "XRP", "LINK", "AVAX", "SUI"];
+const LS_KEY = "gsd:v2";
+const QUICK = [
+  "BTC","ETH","SOL","BNB","XRP","ADA","DOGE","AVAX","DOT","LINK",
+  "MATIC","LTC","ATOM","UNI","NEAR","APT","ARB","OP","SUI","INJ",
+  "FET","RENDER","PEPE","WIF","TON","TRX","HBAR","FIL","AAVE","MKR",
+];
+
+const RISK_LEVELS = {
+  conservador: { label: "Conservador", pct: 0.5, buy: 82, scale: 72 },
+  moderado: { label: "Moderado", pct: 1.0, buy: 76, scale: 68 },
+  agresivo: { label: "Agresivo", pct: 2.0, buy: 70, scale: 62 },
+  muy_agresivo: { label: "Muy agresivo", pct: 3.0, buy: 66, scale: 58 },
+};
 
 const fmt = {
   price(n) {
@@ -26,18 +38,58 @@ const fmt = {
   },
   usd(n) {
     if (n == null || Number.isNaN(n)) return "—";
-    return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+    return "$" + Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
   },
   compact(n) {
     if (n == null || Number.isNaN(n)) return "—";
     return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n);
   },
+  date(ts) {
+    try { return new Date(ts).toLocaleString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
+    catch { return "—"; }
+  },
 };
 
-async function getJson(url) {
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return { history: [], positions: [], capital: 25, riskLevel: "moderado" };
+    return { history: [], positions: [], capital: 25, riskLevel: "moderado", ...JSON.parse(raw) };
+  } catch {
+    return { history: [], positions: [], capital: 25, riskLevel: "moderado" };
+  }
+}
+function saveStore(data) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+}
+
+async function getJson(url, { retries = 3, timeoutMs = 14000 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: ctrl.signal,
+      });
+      if (res.status === 429 || res.status === 503) {
+        lastErr = new Error("El proveedor de datos está saturado. Espera unos segundos y reintenta.");
+        await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+        continue;
+      }
+      if (!res.ok) throw new Error(`No se pudo cargar datos (código ${res.status}).`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e.name === "AbortError"
+        ? new Error("Tiempo de espera agotado. Revisa tu internet e inténtalo de nuevo.")
+        : e;
+      if (attempt < retries - 1) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr || new Error("No se pudieron obtener datos.");
 }
 
 function sma(arr, p) {
@@ -104,7 +156,6 @@ function pivots(candles, w = 3) {
 function analyzeCandles(candles) {
   if (!candles || candles.length < 40) return null;
   const closes = candles.map((c) => c.close);
-  const vols = candles.map((c) => c.volume || 0);
   const s20 = sma(closes, 20);
   const s50 = closes.length >= 50 ? sma(closes, 50) : null;
   const s200 = closes.length >= 200 ? sma(closes, 200) : null;
@@ -134,8 +185,8 @@ function analyzeCandles(candles) {
   const res1 = resists[0] ?? price + (lastAtr || price * 0.04) * 1.8;
   const res2 = resists[1] ?? price + (lastAtr || price * 0.04) * 3.2;
   const res3 = resists[2] ?? price + (lastAtr || price * 0.04) * 5;
+  const distSup = ((price - support) / price) * 100;
 
-  const avgVol = vols.slice(-20).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(20, vols.length));
   let quality = 50;
   if (trend === "alcista") quality += 18;
   if (trend === "bajista") quality -= 18;
@@ -143,8 +194,6 @@ function analyzeCandles(candles) {
   if (lastS200 && price < lastS200) quality -= 8;
   if (lastRsi >= 40 && lastRsi <= 62) quality += 10;
   if (lastRsi > 75) quality -= 14;
-  if (lastRsi < 28) quality -= 4;
-  const distSup = ((price - support) / price) * 100;
   if (distSup <= 8) quality += 8;
   if (distSup > 20) quality -= 6;
   quality = Math.max(0, Math.min(100, Math.round(quality)));
@@ -153,18 +202,18 @@ function analyzeCandles(candles) {
     const idx = candles.length - 120 + i;
     return {
       t: new Date(c.time).toLocaleDateString("es-ES", { day: "2-digit", month: "short" }),
+      time: c.time,
       close: c.close,
       s20: s20[idx],
       s50: s50?.[idx] ?? null,
       s200: s200?.[idx] ?? null,
-      vol: c.volume,
       rsi: rs[idx],
     };
   });
 
   return {
     price, trend, lastRsi, lastAtr, lastS20, lastS50, lastS200, lastE20,
-    support, res1, res2, res3, distSup, quality, avgVol, chart, candles,
+    support, res1, res2, res3, distSup, quality, chart, candles,
   };
 }
 
@@ -211,41 +260,37 @@ function scoreCoin(detail, tech) {
   if (tech?.lastRsi > 75) risk -= 3;
   risk = Math.max(0, risk);
 
-  const total = Math.round(fund + tok + val + liq + tec + risk);
-  return {
-    total: Math.min(100, total),
-    parts: { fund, tok, val, liq, tec, risk },
-  };
+  const total = Math.min(100, Math.round(fund + tok + val + liq + tec + risk));
+  return { total, parts: { fund, tok, val, liq, tec, risk } };
 }
 
-function verdictFrom(score, tech, riskProfile) {
-  const buy = riskProfile === "agresivo" ? 70 : riskProfile === "conservador" ? 82 : 76;
-  const scale = riskProfile === "agresivo" ? 62 : riskProfile === "conservador" ? 72 : 68;
-  if (!tech) return { tag: "OBSERVAR", cls: "v-wait", why: "Faltan datos técnicos de Binance." };
-  if (tech.trend === "bajista" && score < buy) return { tag: "ESPERAR", cls: "v-wait", why: "Tendencia diaria bajista: mejor esperar soporte o giro." };
+function verdictFrom(score, tech, riskLevel) {
+  const cfg = RISK_LEVELS[riskLevel] || RISK_LEVELS.moderado;
+  if (!tech) return { tag: "OBSERVAR", cls: "v-wait", why: "Faltan datos técnicos de Binance para esta moneda." };
+  if (tech.trend === "bajista" && score < cfg.buy) return { tag: "ESPERAR", cls: "v-wait", why: "Tendencia diaria bajista: mejor esperar soporte o giro." };
   if (tech.lastRsi > 78) return { tag: "ESPERAR", cls: "v-wait", why: "RSI muy alto: mala relación riesgo/beneficio ahora." };
   if (tech.distSup > 22) return { tag: "ESPERAR", cls: "v-wait", why: `Precio lejos del soporte (${tech.distSup.toFixed(0)}%). No perseguir.` };
-  if (score >= buy) return { tag: "COMPRAR", cls: "v-buy", why: "Confluencia de score, liquidez y estructura técnica." };
-  if (score >= scale) return { tag: "COMPRAR EN TRAMOS", cls: "v-scale", why: "Ventaja parcial: entrar por partes según tu plan." };
+  if (score >= cfg.buy) return { tag: "COMPRAR", cls: "v-buy", why: "Confluencia de score, liquidez y estructura técnica para tu perfil." };
+  if (score >= cfg.scale) return { tag: "COMPRAR EN TRAMOS", cls: "v-scale", why: "Ventaja parcial: entrar por partes según el plan." };
   if (score >= 55) return { tag: "OBSERVAR", cls: "v-wait", why: "Interesante para seguir, sin entrada clara hoy." };
-  return { tag: "NO COMPRAR", cls: "v-no", why: "Calidad/riesgo no justifican entrada en Spot ahora." };
+  return { tag: "NO COMPRAR", cls: "v-no", why: "Calidad/riesgo no justifican entrada Spot ahora." };
 }
 
 function buildPlan(capital, riskPct, entry, stop) {
   capital = Number(capital) || 0;
   if (capital < 5) {
-    return { tooSmall: true, msg: `Con $${capital.toFixed(2)} es muy justo. Recomiendo al menos $5–$15 en Binance Spot (comisiones y mínimo práctico).` };
+    return { tooSmall: true, msg: `Con $${capital.toFixed(2)} es justo. Recomiendo al menos $5–$15 en Binance Spot.` };
   }
   if (!entry || !stop || stop >= entry) return null;
   const maxRisk = capital * (riskPct / 100);
   const stopPct = (entry - stop) / entry;
-  let size = Math.min(capital, maxRisk / stopPct);
+  let size = Math.min(capital, maxRisk / Math.max(stopPct, 0.005));
   if (size < 5 && capital >= 5) size = 5;
   const units = size / entry;
   const tramos =
     size >= 15
       ? [
-          { label: "Tramo 1 · zona actual / preferida", usd: size * 0.4 },
+          { label: "Tramo 1 · zona actual", usd: size * 0.4 },
           { label: "Tramo 2 · si baja a soporte", usd: size * 0.35 },
           { label: "Tramo 3 · solo si se confirma", usd: size * 0.25 },
         ]
@@ -266,24 +311,14 @@ async function fetchCandles(symbol) {
       if (!Array.isArray(raw) || raw.length < 40) continue;
       return raw
         .filter((k) => k[6] <= Date.now())
-        .map((k) => ({
-          time: k[0],
-          open: +k[1],
-          high: +k[2],
-          low: +k[3],
-          close: +k[4],
-          volume: +k[5],
-        }));
-    } catch {
-      /* next pair */
-    }
+        .map((k) => ({ time: k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] }));
+    } catch { /* next */ }
   }
   return null;
 }
 
 async function resolveAndDetail(query) {
   const q = query.trim();
-  // try search
   let id = q.toLowerCase();
   try {
     const search = await getJson(`${CG}/search?query=${encodeURIComponent(q)}`);
@@ -293,49 +328,49 @@ async function resolveAndDetail(query) {
       coins.find((c) => c.id === q.toLowerCase()) ||
       coins[0];
     if (exact) id = exact.id;
-  } catch {
-    /* use raw */
-  }
-  const detail = await getJson(
+  } catch { /* use raw */ }
+  return getJson(
     `${CG}/coins/${id}?localization=false&tickers=false&market_data=true&community_data=true&developer_data=true&sparkline=false`
   );
-  return detail;
 }
 
-function ChartBlock({ tech, stop, targets }) {
+function ChartBlock({ tech, stop, targets, entryMarks }) {
   if (!tech?.chart?.length) return null;
   return (
     <>
       <div className="chart-box">
         <ResponsiveContainer>
           <ComposedChart data={tech.chart} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke="#243041" strokeDasharray="3 4" vertical={false} />
-            <XAxis dataKey="t" tick={{ fill: "#8b9bb0", fontSize: 10 }} minTickGap={32} axisLine={false} tickLine={false} />
-            <YAxis domain={["auto", "auto"]} tick={{ fill: "#8b9bb0", fontSize: 10 }} width={64} axisLine={false} tickLine={false} tickFormatter={(v) => fmt.price(v)} />
+            <CartesianGrid stroke="#1e2a3a" strokeDasharray="3 4" vertical={false} />
+            <XAxis dataKey="t" tick={{ fill: "#7d8fa3", fontSize: 10 }} minTickGap={32} axisLine={false} tickLine={false} />
+            <YAxis domain={["auto", "auto"]} tick={{ fill: "#7d8fa3", fontSize: 10 }} width={64} axisLine={false} tickLine={false} tickFormatter={(v) => fmt.price(v)} />
             <Tooltip
-              contentStyle={{ background: "#11171f", border: "1px solid #243041", borderRadius: 10, fontSize: 12 }}
-              formatter={(v, n) => [n === "Vol" ? fmt.compact(v) : fmt.price(v), n]}
+              contentStyle={{ background: "#0f141c", border: "1px solid #1e2a3a", borderRadius: 10, fontSize: 12 }}
+              formatter={(v, n) => [fmt.price(v), n]}
             />
-            {stop && <ReferenceLine y={stop} stroke="#f07178" strokeDasharray="4 3" />}
-            {targets?.map((t, i) => t && <ReferenceLine key={i} y={t} stroke="#3ecf8e" strokeDasharray="4 3" />)}
-            <ReferenceLine y={tech.support} stroke="#5b9fd4" strokeDasharray="2 2" />
-            <Line type="monotone" dataKey="close" stroke="#e8edf4" strokeWidth={2} dot={false} name="Precio" />
-            <Line type="monotone" dataKey="s20" stroke="#e6b84d" strokeWidth={1.2} dot={false} name="SMA20" />
-            <Line type="monotone" dataKey="s50" stroke="#5b9fd4" strokeWidth={1.1} dot={false} name="SMA50" />
-            <Line type="monotone" dataKey="s200" stroke="#9b7bdb" strokeWidth={1} dot={false} strokeDasharray="5 3" name="SMA200" />
+            {stop && <ReferenceLine y={stop} stroke="#ef4444" strokeDasharray="4 3" />}
+            {targets?.map((t, i) => t && <ReferenceLine key={i} y={t} stroke="#22c55e" strokeDasharray="4 3" />)}
+            <ReferenceLine y={tech.support} stroke="#3d8bfd" strokeDasharray="2 2" />
+            {entryMarks?.map((m, i) => (
+              <ReferenceLine key={"e" + i} y={m.price} stroke="#f0b429" strokeDasharray="6 3" />
+            ))}
+            <Line type="monotone" dataKey="close" stroke="#eef2f7" strokeWidth={2} dot={false} name="Precio" />
+            <Line type="monotone" dataKey="s20" stroke="#00d4aa" strokeWidth={1.2} dot={false} name="SMA20" />
+            <Line type="monotone" dataKey="s50" stroke="#3d8bfd" strokeWidth={1.1} dot={false} name="SMA50" />
+            <Line type="monotone" dataKey="s200" stroke="#a78bfa" strokeWidth={1} dot={false} strokeDasharray="5 3" name="SMA200" />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
       <div className="chart-sub">
         <ResponsiveContainer>
           <ComposedChart data={tech.chart} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-            <YAxis domain={[0, 100]} tick={{ fill: "#8b9bb0", fontSize: 9 }} width={64} axisLine={false} tickLine={false} />
+            <YAxis domain={[0, 100]} tick={{ fill: "#7d8fa3", fontSize: 9 }} width={64} axisLine={false} tickLine={false} />
             <XAxis dataKey="t" hide />
-            <ReferenceLine y={70} stroke="#f07178" strokeDasharray="3 3" strokeOpacity={0.5} />
-            <ReferenceLine y={30} stroke="#3ecf8e" strokeDasharray="3 3" strokeOpacity={0.5} />
-            <ReferenceArea y1={40} y2={60} fill="#e6b84d" fillOpacity={0.06} />
-            <Line type="monotone" dataKey="rsi" stroke="#e6b84d" strokeWidth={1.4} dot={false} name="RSI" />
-            <Tooltip contentStyle={{ background: "#11171f", border: "1px solid #243041", borderRadius: 8, fontSize: 11 }} />
+            <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.5} />
+            <ReferenceLine y={30} stroke="#22c55e" strokeDasharray="3 3" strokeOpacity={0.5} />
+            <ReferenceArea y1={40} y2={60} fill="#00d4aa" fillOpacity={0.05} />
+            <Line type="monotone" dataKey="rsi" stroke="#f0b429" strokeWidth={1.4} dot={false} name="RSI" />
+            <Tooltip contentStyle={{ background: "#0f141c", border: "1px solid #1e2a3a", borderRadius: 8, fontSize: 11 }} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -343,122 +378,387 @@ function ChartBlock({ tech, stop, targets }) {
   );
 }
 
-function assistantReply(q, ctx) {
-  const query = q.toLowerCase();
-  const { detail, tech, score, verdict, plan, capital, riskPct } = ctx;
-  const name = detail?.name || "el activo";
-  const price = tech?.price;
 
-  if (/cu[aá]nto|comprar|posici[oó]n|tama[nñ]o|d[oó]lar|\$|invertir|tramo/.test(query)) {
-    if (!plan) return "Primero analiza una moneda y configura tu capital arriba.";
-    if (plan.tooSmall) return plan.msg;
+function signalConfidence(tech, score, riskLevel) {
+  if (!tech || !score) return { label: "Sin datos", pct: 0, note: "Analiza una moneda primero." };
+  let pct = 40;
+  pct += Math.min(25, Math.round(score.total * 0.25));
+  pct += Math.min(15, Math.round((tech.quality || 0) * 0.15));
+  if (tech.trend === "alcista") pct += 8;
+  if (tech.trend === "bajista") pct -= 10;
+  if (tech.lastRsi >= 40 && tech.lastRsi <= 65) pct += 6;
+  if (tech.lastRsi > 75) pct -= 12;
+  if (tech.distSup != null && tech.distSup <= 10) pct += 6;
+  if (tech.distSup != null && tech.distSup > 20) pct -= 8;
+  if (riskLevel === "conservador") pct -= 3;
+  if (riskLevel === "muy_agresivo") pct += 2;
+  pct = Math.max(5, Math.min(92, Math.round(pct)));
+  let label = "Baja";
+  if (pct >= 70) label = "Alta";
+  else if (pct >= 55) label = "Media-alta";
+  else if (pct >= 40) label = "Media";
+  return {
+    label,
+    pct,
+    note: pct >= 70
+      ? "Confluencia razonable: aún así usa stop y tramos."
+      : pct >= 50
+        ? "Señal usable con cautela: no all-in."
+        : "Poca confluencia: mejor esperar o tamaño mínimo.",
+  };
+}
+
+function buildBuyTiming(tech, verdict, stop, livePrice) {
+  if (!tech) return null;
+  const price = livePrice || tech.price;
+  const atr = tech.lastAtr || price * 0.03;
+  const support = tech.support;
+  // Zonas de precio
+  const zonaIdealMin = support * 0.99;
+  const zonaIdealMax = Math.min(support * 1.025, price * 0.998);
+  const zonaOkMin = support * 1.01;
+  const zonaOkMax = Math.min(support * 1.05, price * 1.002);
+  const zonaAgresivaMax = Math.min(price * 1.005, support * 1.08);
+
+  let momento = "ESPERAR";
+  let detalle = "";
+  let color = "wait";
+
+  const nearSupport = tech.distSup != null && tech.distSup <= 8;
+  const midSupport = tech.distSup != null && tech.distSup <= 14;
+  const overbought = tech.lastRsi != null && tech.lastRsi > 72;
+  const tag = verdict?.tag || "";
+
+  if (tag === "NO COMPRAR" || tag === "OBSERVAR" && tech.trend === "bajista") {
+    momento = "NO ENTRAR AHORA";
+    detalle = "La calidad o la tendencia no justifican comprar en este momento. Espera mejor estructura.";
+    color = "no";
+  } else if (overbought || tech.distSup > 20) {
+    momento = "ESPERAR RETROCESO";
+    detalle = `Precio actual ${fmt.price(price)} está extendido o caliente. Mejor comprar más cerca del soporte ~${fmt.price(support)}.`;
+    color = "wait";
+  } else if (tag.includes("COMPRAR") && nearSupport && !overbought) {
+    momento = "VENTANA DE COMPRA AHORA";
+    detalle = `Estás cerca del soporte y el veredicto es favorable. Prioriza la zona ${fmt.price(zonaIdealMin)} – ${fmt.price(zonaIdealMax)}.`;
+    color = "now";
+  } else if (tag.includes("COMPRAR") && midSupport) {
+    momento = "COMPRAR EN TRAMOS";
+    detalle = `Puedes empezar un tramo pequeño cerca de ${fmt.price(price)} y guardar el resto para ${fmt.price(support)}–${fmt.price(zonaOkMax)}.`;
+    color = "scale";
+  } else if (tag.includes("COMPRAR")) {
+    momento = "COMPRAR CON CUIDADO / TRAMOS";
+    detalle = `Hay señal, pero no es el soporte perfecto. No metas todo el capital de golpe a ${fmt.price(price)}.`;
+    color = "scale";
+  } else {
+    momento = "ESPERAR MEJOR PRECIO";
+    detalle = `Observa. Interés de compra más sano entre ${fmt.price(zonaIdealMin)} y ${fmt.price(zonaIdealMax)}.`;
+    color = "wait";
+  }
+
+  return {
+    momento, detalle, color,
+    precioActual: price,
+    zonaIdeal: { min: zonaIdealMin, max: Math.max(zonaIdealMin, zonaIdealMax) },
+    zonaAceptable: { min: zonaOkMin, max: Math.max(zonaOkMin, zonaOkMax) },
+    zonaAgresiva: { min: price * 0.995, max: zonaAgresivaMax },
+    soporte: support,
+    stop,
+    tp1: tech.res1,
+    tp2: tech.res2,
+    tp3: tech.res3,
+    condicion: "Si el precio pierde el stop con fuerza, la idea de compra queda invalidada. No promediar a la baja sin plan.",
+  };
+}
+
+/** Asistente local amplio (sin Gemini): guía + datos del análisis + conocimiento Spot estructurado */
+function assistantReply(q, ctx) {
+  const query = (q || "").toLowerCase().trim();
+  const { detail, tech, score, verdict, plan, capital, riskLevel, positions, history } = ctx;
+  const name = detail?.name || null;
+  const price = tech?.price;
+  const risk = RISK_LEVELS[riskLevel] || RISK_LEVELS.moderado;
+  const stop = tech ? Math.min(tech.support * 0.96, tech.price - (tech.lastAtr || tech.price * 0.03) * 1.4) : null;
+
+  // Guía por pasos
+  if (/c[oó]mo empiezo|gu[ií]a|paso a paso|qu[eé] hago|tutorial|ayúdame a/.test(query)) {
     return [
-      `Con capital de operación **$${Number(capital).toFixed(2)}** y riesgo **${riskPct}%**:`,
-      `• Tamaño sugerido total: **${fmt.usd(plan.size)}**`,
-      `• Unidades aprox.: **${plan.units.toFixed(6)}** @ ${fmt.price(price)}`,
-      `• Riesgo máximo si salta el stop: **${fmt.usd(plan.maxRisk)}** (~${plan.stopPct.toFixed(1)}%)`,
+      "Guía Spot paso a paso (como un coach):",
+      "1) Elige perfil de riesgo arriba (Conservador → Muy agresivo).",
+      "2) Pon el capital que sí puedes arriesgar (ej. $15–$50).",
+      "3) Analiza BTC o ETH si empiezas (más líquidos, comisiones más bajas).",
+      "4) Lee: veredicto · escenarios · cuánto comprar en tramos.",
+      "5) Si decides entrar: pulsa «Registré compra», anota precio y $.",
+      "6) Compra MANUAL en Binance Spot (la app no ejecuta órdenes).",
+      "7) Revisa «Mis posiciones» para ver si hay rendimiento.",
       "",
-      ...plan.tramos.map((t) => `– ${t.label}: **${fmt.usd(t.usd)}**`),
-      "",
-      "Hazlo **manual** en Binance Spot. Yo no ejecuto órdenes.",
+      "Regla de oro: el stop existe para limitar daño, no para «tener razón».",
     ].join("\n");
   }
 
-  if (/subir|bajar|predic|objetivo|tp|escenario|a cu[aá]nto|hacia/.test(query)) {
-    if (!tech) return "Analiza una moneda para ver escenarios técnicos.";
+  if (/nueva cripto|listada|sale una|token nuevo|aparecer[aá] aqu[ií]/.test(query)) {
+    return [
+      "Sí: si una cripto nueva está en CoinGecko y tiene par en Binance (USDT/USDC), puedes buscarla por nombre o símbolo.",
+      "No aparece sola en los chips rápidos hasta que la busques.",
+      "Ojo: tokens nuevos suelen ser más peligrosos (poca liquidez, manipulación, unlocks). Con capital pequeño prioriza BTC/ETH/SOL.",
+    ].join("\n");
+  }
+
+  if (/riesgo|perfil|conservador|agresivo|porcent/.test(query) && !/stop|invalid/.test(query)) {
+    return [
+      `Tu perfil actual: **${risk.label}** → riesgo ~${risk.pct}% del capital por operación.`,
+      "Conservador (0.5%): prioriza no perder; umbral de compra más alto.",
+      "Moderado (1%): equilibrio típico para Spot.",
+      "Agresivo (2%) / Muy agresivo (3%): más tamaño, más daño si falla el stop.",
+      "El porcentaje no es «cuánto vas a ganar»: es el techo de pérdida planificada si salta el stop.",
+    ].join("\n");
+  }
+
+  if (/comisi[oó]n|fee|binance|spot vs future|apalanc/.test(query)) {
+    return [
+      "Spot Binance: compras el activo real (sin apalancamiento). Pierdes como máximo lo invertido (más comisiones).",
+      "Futures/apalancamiento: puedes perder más rápido; esta app está pensada para Spot.",
+      "Comisiones: dependen de tu nivel VIP y si usas BNB. Con $5–$20 elige monedas líquidas (BTC/ETH) para que el fee no se coma el trade.",
+      "Tip: evita overtrading. Con capital pequeño, 1–2 ideas claras > 10 entradas.",
+    ].join("\n");
+  }
+
+  if (/dca|promedio|escalon|tramo/.test(query)) {
+    return [
+      "Comprar en tramos (DCA táctico) reduce el error de timing.",
+      "Ejemplo: 40% ahora, 35% si baja a soporte, 25% solo si confirma (rompe resistencia con volumen).",
+      "No promedio una tesis rota: si pierde el stop, no «añadas para recuperar».",
+      plan && !plan.tooSmall
+        ? `Con tu capital, el plan actual sugiere ~${fmt.usd(plan.size)} repartidos en ${plan.tramos.length} tramo(s).`
+        : "Analiza una moneda para ver tramos numéricos.",
+    ].join("\n");
+  }
+
+  if (/cu[aá]nto|comprar|posici[oó]n|tama[nñ]o|d[oó]lar|\$|invertir/.test(query)) {
+    if (!plan) return "Analiza una moneda y configura capital. Luego te digo el tamaño exacto.";
+    if (plan.tooSmall) return plan.msg;
+    return [
+      `Capital ~$${Number(capital).toFixed(2)} · perfil ${risk.label} (${risk.pct}%):`,
+      `• Tamaño sugerido: **${fmt.usd(plan.size)}**`,
+      `• Unidades ~**${plan.units.toFixed(6)}** @ ${fmt.price(price)}`,
+      `• Riesgo máx. si salta stop: **${fmt.usd(plan.maxRisk)}** (~${plan.stopPct.toFixed(1)}%)`,
+      "",
+      ...plan.tramos.map((t) => `– ${t.label}: **${fmt.usd(t.usd)}**`),
+      "",
+      "Ejecuta en Binance Spot a mano. Aquí solo planificas.",
+    ].join("\n");
+  }
+
+  if (/subir|bajar|predic|objetivo|tp|escenario|a cu[aá]nto|hacia|futuro/.test(query)) {
+    if (!tech) return "Primero analiza una moneda para escenarios técnicos.";
     const p = tech.price;
     const pct = (x) => fmt.pct((x / p - 1) * 100);
     return [
-      `⚠️ No es una predicción garantizada. Son **niveles técnicos** (ATR + pivots).`,
+      "No es profecía. Son niveles técnicos (ATR + pivots de velas diarias Binance).",
+      `Ref. **${fmt.price(p)}** · ATR ~${fmt.price(tech.lastAtr)}`,
       "",
-      `Precio ref. **${fmt.price(p)}** · ATR ~${fmt.price(tech.lastAtr)}`,
-      "",
-      `📈 Alcista`,
+      "Alcista:",
       `• TP1 ${fmt.price(tech.res1)} (${pct(tech.res1)})`,
       `• TP2 ${fmt.price(tech.res2)} (${pct(tech.res2)})`,
       `• TP3 ${fmt.price(tech.res3)} (${pct(tech.res3)})`,
       "",
-      `📉 Bajista`,
+      "Bajista:",
       `• Soporte ${fmt.price(tech.support)} (${pct(tech.support)})`,
-      `• Stop ${fmt.price(Math.min(tech.support * 0.96, p - tech.lastAtr * 1.4))} (${pct(Math.min(tech.support * 0.96, p - tech.lastAtr * 1.4))})`,
+      `• Stop ${fmt.price(stop)} (${pct(stop)})`,
       "",
-      `Veredicto actual: **${verdict?.tag}** — ${verdict?.why}`,
+      verdict ? `Veredicto: **${verdict.tag}** — ${verdict.why}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  if (/stop|invalid|d[oó]nde salgo|cortar p[eé]rdida/.test(query)) {
+    if (!tech) return "Analiza una moneda para calcular el stop.";
+    return [
+      `Stop sugerido${name ? " en " + name : ""}: **${fmt.price(stop)}** (${fmt.pct((stop / tech.price - 1) * 100)}).`,
+      "Lógica: debajo del soporte relevante y con margen de ATR para no salir por ruido.",
+      "Si el precio cierra con fuerza bajo ese nivel, la entrada queda invalidada.",
     ].join("\n");
   }
 
-  if (/stop|invalid|riesgo|perder/.test(query)) {
-    if (!tech) return "Necesito un análisis primero.";
-    const stop = Math.min(tech.support * 0.96, tech.price - tech.lastAtr * 1.4);
-    return `Stop sugerido para ${name}: **${fmt.price(stop)}** (${fmt.pct((stop / tech.price - 1) * 100)} desde el precio). Si cierra con fuerza debajo, la tesis de entrada se invalida.`;
+  if (/veredicto|debo|momento|se[nñ]al|entrar|compro o no|cu[aá]ndo comprar|a qu[eé] precio|precio de entrada|zona de compra/.test(query)) {
+    if (!verdict || !tech) return "Analiza BTC, ETH o la moneda que te interese para ver cuándo y a qué precio comprar.";
+    const timing = buildBuyTiming(tech, verdict, stop, price);
+    if (!timing) return `**${verdict.tag}**\n${verdict.why}`;
+    return [
+      `**${timing.momento}**`,
+      timing.detalle,
+      "",
+      `Precio actual: **${fmt.price(timing.precioActual)}**`,
+      `Zona ideal de compra: **${fmt.price(timing.zonaIdeal.min)} – ${fmt.price(timing.zonaIdeal.max)}**`,
+      `Zona aceptable: **${fmt.price(timing.zonaAceptable.min)} – ${fmt.price(timing.zonaAceptable.max)}**`,
+      `Stop: **${fmt.price(timing.stop)}**`,
+      `Objetivos: TP1 ${fmt.price(timing.tp1)} · TP2 ${fmt.price(timing.tp2)} · TP3 ${fmt.price(timing.tp3)}`,
+      "",
+      `Veredicto: **${verdict.tag}** — ${verdict.why}`,
+      `Score ${score?.total ?? "—"}/100 · RSI ${tech.lastRsi?.toFixed?.(1) ?? "—"} · Perfil ${risk.label}`,
+    ].join("\n");
   }
 
-  if (/veredicto|debo|momento|se[nñ]al|entrar/.test(query)) {
-    if (!verdict) return "Analiza una moneda (BTC, ETH, SOL…) y te digo el veredicto.";
-    return `**${verdict.tag}**\n${verdict.why}\nScore ${score?.total ?? "—"}/100 · Tendencia ${tech?.trend ?? "—"} · RSI ${tech?.lastRsi?.toFixed?.(1) ?? "—"}`;
+  if (/posici[oó]n|rendimiento|ganancia|p[eé]rdida|pnl|mis compras/.test(query)) {
+    if (!positions?.length) return "Aún no has registrado compras. Analiza una moneda y usa «Registré compra».";
+    const lines = positions.slice(0, 8).map((p) => {
+      const pnl = p.lastPrice != null ? ((p.lastPrice / p.entryPrice - 1) * 100) : null;
+      return `• ${p.symbol}: entrada ${fmt.price(p.entryPrice)} · ${fmt.usd(p.usd)} · ${pnl == null ? "P&L n/d" : fmt.pct(pnl)}`;
+    });
+    return ["Tus posiciones guardadas (local):", ...lines].join("\n");
   }
 
-  return [
-    `Puedo ayudarte con datos reales de **${name !== "el activo" ? name : "el mercado"}**:`,
-    "1) ¿Cuánto comprar con tu capital?",
-    "2) Escenarios de precio (arriba / abajo)",
-    "3) Stop y veredicto",
-    "",
-    name === "el activo" ? "Tip: escribe BTC o ETH arriba y pulsa Analizar." : `Tengo cargado ${name}. Pregunta lo que necesites.`,
-  ].join("\n");
+  if (/historial|b[uú]squeda|qu[eé] busqu[eé]/.test(query)) {
+    if (!history?.length) return "Todavía no hay búsquedas guardadas.";
+    return ["Últimas búsquedas:", ...history.slice(0, 10).map((h) => `• ${h.symbol} · ${fmt.date(h.at)}`)].join("\n");
+  }
+
+  if (/rsi|sma|soporte|resistencia|tendencia|indicador/.test(query)) {
+    if (!tech) return "Analiza una moneda para hablar de sus indicadores concretos.";
+    return [
+      `Tendencia 1D: **${tech.trend}**`,
+      `RSI(14): **${tech.lastRsi?.toFixed?.(1)}** (zona media 40–60 suele ser más sana para entrar que >75)`,
+      `SMA20 ${fmt.price(tech.lastS20)} · SMA50 ${fmt.price(tech.lastS50)} · SMA200 ${fmt.price(tech.lastS200)}`,
+      `Soporte ~${fmt.price(tech.support)} · Resistencias ${fmt.price(tech.res1)} / ${fmt.price(tech.res2)}`,
+      "Precio sobre SMA200 con SMAs alineadas al alza = estructura más sana. Lo contrario invita a esperar.",
+    ].join("\n");
+  }
+
+  if (/meme|pepe|shitcoin|100x/.test(query)) {
+    return "Los memes pueden subir fuerte y caer más fuerte. Con capital pequeño, trata cualquier meme como especulación alta: tamaño mínimo, stop claro, cero promedios si se rompe. Esta app prioriza disciplina Spot, no lotería.";
+  }
+
+  // Fallback + más ayuda
+  if (/confianza|segura|fiable|qu[eé] tan buena|calidad de se[nñ]al/.test(query)) {
+    const conf = signalConfidence(tech, score, riskLevel);
+    return [
+      `Confianza de la señal actual: **${conf.label} (${conf.pct}/100)**`,
+      conf.note,
+      "No es probabilidad de ganar: es confluencia de score + técnico + contexto.",
+    ].join("\n");
+  }
+
+  if (/error|no carga|falla|api|datos/.test(query)) {
+    return "Si falla el análisis: 1) espera 20–30 s (límite de APIs), 2) prueba BTC/ETH, 3) recarga la página, 4) revisa internet. La app reintenta sola varias veces.";
+  }
+
+  if (/regla|disciplina|checklist|antes de comprar/.test(query)) {
+    return [
+      "Checklist antes de comprar:",
+      "1) ¿El momento NO dice «NO ENTRAR» ni «ESPERAR RETROCESO» extremo?",
+      "2) ¿Tienes zona ideal y stop escritos?",
+      "3) ¿El tamaño es ≤ lo que el plan sugiere?",
+      "4) ¿Si pierde el stop, te duele poco?",
+      "5) ¿Vas a registrar la compra en la app?",
+      "Si falla un punto, no entres o reduce a un tramo mínimo.",
+    ].join("\n");
+  }
+
+  const conf = signalConfidence(tech, score, riskLevel);
+  const bits = [
+    "Puedo ayudarte con: cuándo/a qué precio comprar, tramos, stops, RSI/SMA, riesgo, comisiones Spot, checklist, tus posiciones y el activo cargado.",
+    name
+      ? `Contexto actual: **${name}** · veredicto ${verdict?.tag || "—"} · confianza señal ${conf.label} (${conf.pct}/100).`
+      : "Carga una moneda (Analizar) para números reales de entrada/stop/TP.",
+    "Ejemplos: «¿cuándo comprar?», «checklist», «¿qué tan fiable es la señal?», «¿cuánto compro con $20?»",
+  ];
+  return bits.join("\n\n");
 }
 
 export default function App() {
-  const [capital, setCapital] = useState(25);
-  const [riskPct, setRiskPct] = useState(1);
-  const [riskProfile, setRiskProfile] = useState("moderado");
+  const initial = loadStore();
+  const [capital, setCapital] = useState(initial.capital);
+  const [riskLevel, setRiskLevel] = useState(initial.riskLevel);
   const [query, setQuery] = useState("BTC");
+  const [tab, setTab] = useState("analizar");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
   const [tech, setTech] = useState(null);
   const [live, setLive] = useState(null);
   const [dir, setDir] = useState(0);
+  const [history, setHistory] = useState(initial.history || []);
+  const [positions, setPositions] = useState(initial.positions || []);
+  const [buyUsd, setBuyUsd] = useState("");
+  const [buyPrice, setBuyPrice] = useState("");
   const [msgs, setMsgs] = useState([
     {
       role: "bot",
-      text: "Soy Grok Spot Desk. Analizo Spot con datos reales (CoinGecko + Binance).\nPregúntame cuánto comprar, escenarios de precio o el stop.\nNo ejecuto órdenes ni garantizo ganancias.",
+      text: "Soy tu guía Spot (sin IA externa).\nPregunta lo que necesites sobre riesgo, tamaño, stops, escenarios o tus posiciones.\nTodo se guarda en este navegador: búsquedas y compras no se borran al cerrar.",
     },
   ]);
   const [chatIn, setChatIn] = useState("");
   const endRef = useRef(null);
 
+  const riskPct = (RISK_LEVELS[riskLevel] || RISK_LEVELS.moderado).pct;
   const score = useMemo(() => (detail && tech ? scoreCoin(detail, tech) : null), [detail, tech]);
   const stop = useMemo(() => {
     if (!tech) return null;
     return Math.min(tech.support * 0.96, tech.price - (tech.lastAtr || tech.price * 0.03) * 1.4);
   }, [tech]);
-  const verdict = useMemo(() => (score && tech ? verdictFrom(score.total, tech, riskProfile) : null), [score, tech, riskProfile]);
-  const plan = useMemo(() => buildPlan(capital, riskPct, live || tech?.price, stop), [capital, riskPct, live, tech, stop]);
+  const verdict = useMemo(
+    () => (score && tech ? verdictFrom(score.total, tech, riskLevel) : null),
+    [score, tech, riskLevel]
+  );
+  const plan = useMemo(
+    () => buildPlan(capital, riskPct, live || tech?.price, stop),
+    [capital, riskPct, live, tech, stop]
+  );
+
+  // persist settings + lists
+  useEffect(() => {
+    saveStore({ capital, riskLevel, history, positions });
+  }, [capital, riskLevel, history, positions]);
 
   const run = useCallback(async (q) => {
     const term = (q || query).trim();
     if (!term) return;
     setLoading(true);
     setError(null);
+    setTab("analizar");
     try {
       const d = await resolveAndDetail(term);
       const symbol = d.symbol?.toUpperCase();
       const candles = await fetchCandles(symbol);
       const t = analyzeCandles(candles);
+      if (!t) {
+        setDetail(d);
+        setTech(null);
+        setLive(d.market_data?.current_price?.usd ?? null);
+        setError("Hay datos de mercado, pero no velas suficientes en Binance para esta moneda. Prueba un par USDT más líquido (BTC, ETH, SOL…).");
+        setQuery(symbol || term);
+        setHistory((h) => {
+          const entry = { id: d.id, symbol, name: d.name, image: d.image?.thumb || d.image?.small, at: Date.now() };
+          return [entry, ...h.filter((x) => x.id !== d.id)].slice(0, 40);
+        });
+        return;
+      }
       setDetail(d);
       setTech(t);
-      setLive(t?.price ?? d.market_data?.current_price?.usd ?? null);
+      const px = t?.price ?? d.market_data?.current_price?.usd ?? null;
+      setLive(px);
       setQuery(symbol || term);
+      setBuyPrice(px != null ? String(px) : "");
+      setBuyUsd((prev) => prev || String(Math.min(Number(capital) || 10, 15)));
+      setHistory((h) => {
+        const entry = {
+          id: d.id,
+          symbol,
+          name: d.name,
+          image: d.image?.thumb || d.image?.small,
+          at: Date.now(),
+        };
+        const rest = h.filter((x) => x.id !== d.id);
+        return [entry, ...rest].slice(0, 40);
+      });
     } catch (e) {
-      setError(e.message || "No se pudo analizar. Prueba BTC, ETH o SOL.");
+      setError(e.message || "No se pudo analizar. Prueba BTC o ETH, o espera 20 s si la API está limitada.");
       setDetail(null);
       setTech(null);
     } finally {
       setLoading(false);
     }
-  }, [query]);
+  }, [query, capital]);
 
-  // live price
+  // live price + refresh position marks
   useEffect(() => {
     if (!detail?.symbol) return;
     let stopPoll = false;
@@ -476,20 +776,53 @@ export default function App() {
                 if (prev != null) setDir(px > prev ? 1 : px < prev ? -1 : 0);
                 return px;
               });
+              setPositions((ps) =>
+                ps.map((pos) =>
+                  pos.symbol === sym ? { ...pos, lastPrice: px, lastAt: Date.now() } : pos
+                )
+              );
             }
             return;
           }
         }
-        // fallback CG
         const j = await getJson(`${CG}/simple/price?ids=${detail.id}&vs_currencies=usd`);
         const px = j?.[detail.id]?.usd;
-        if (Number.isFinite(px) && !stopPoll) setLive(px);
+        if (Number.isFinite(px) && !stopPoll) {
+          setLive(px);
+          setPositions((ps) =>
+            ps.map((pos) =>
+              pos.id === detail.id ? { ...pos, lastPrice: px, lastAt: Date.now() } : pos
+            )
+          );
+        }
       } catch { /* ignore */ }
     };
     tick();
-    const iv = setInterval(tick, 10000);
+    const iv = setInterval(tick, 12000);
     return () => { stopPoll = true; clearInterval(iv); };
   }, [detail?.id, detail?.symbol]);
+
+  // refresh last prices for open positions periodically
+  useEffect(() => {
+    if (!positions.length) return;
+    let dead = false;
+    async function refresh() {
+      for (const p of positions) {
+        try {
+          const j = await getJson(`${CG}/simple/price?ids=${p.id}&vs_currencies=usd`);
+          const px = j?.[p.id]?.usd;
+          if (Number.isFinite(px) && !dead) {
+            setPositions((ps) =>
+              ps.map((x) => (x.id === p.id ? { ...x, lastPrice: px, lastAt: Date.now() } : x))
+            );
+          }
+        } catch { /* skip */ }
+      }
+    }
+    refresh();
+    const iv = setInterval(refresh, 60000);
+    return () => { dead = true; clearInterval(iv); };
+  }, [positions.length]); // eslint-disable-line
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
 
@@ -498,24 +831,66 @@ export default function App() {
     if (!q) return;
     setChatIn("");
     setMsgs((m) => [...m, { role: "me", text: q }]);
-    const reply = assistantReply(q, { detail, tech, score, verdict, plan, capital, riskPct });
-    setTimeout(() => setMsgs((m) => [...m, { role: "bot", text: reply }]), 200);
+    const reply = assistantReply(q, {
+      detail, tech, score, verdict, plan, capital, riskLevel, positions, history,
+    });
+    setTimeout(() => setMsgs((m) => [...m, { role: "bot", text: reply }]), 180);
+  }
+
+  function registerBuy() {
+    if (!detail || !tech) return;
+    const entryPrice = Number(buyPrice) || live || tech.price;
+    const usd = Number(buyUsd) || 0;
+    if (!entryPrice || usd < 1) {
+      setError("Indica precio de entrada y dólares comprados (mín. ~$1).");
+      return;
+    }
+    const pos = {
+      id: detail.id,
+      symbol: detail.symbol.toUpperCase(),
+      name: detail.name,
+      image: detail.image?.thumb || detail.image?.small,
+      entryPrice,
+      usd,
+      units: usd / entryPrice,
+      at: Date.now(),
+      lastPrice: live || entryPrice,
+      lastAt: Date.now(),
+      stopAtRegister: stop,
+    };
+    setPositions((ps) => [pos, ...ps].slice(0, 50));
+    setError(null);
+    setMsgs((m) => [
+      ...m,
+      {
+        role: "bot",
+        text: `Compra registrada: **${pos.symbol}** · ${fmt.usd(usd)} @ ${fmt.price(entryPrice)}.\nQueda guardada aunque cierres la página. Mírala en la pestaña «Posiciones» y en el gráfico (línea dorada = tu entrada).`,
+      },
+    ]);
+    setTab("posiciones");
+  }
+
+  function removePosition(at) {
+    setPositions((ps) => ps.filter((p) => p.at !== at));
+  }
+  function clearHistory() {
+    setHistory([]);
   }
 
   const md = detail?.market_data;
   const displayPrice = live ?? tech?.price ?? md?.current_price?.usd;
+  const entryMarks = positions
+    .filter((p) => detail && p.id === detail.id)
+    .map((p) => ({ price: p.entryPrice }));
 
   return (
     <div className="app">
       <header className="header">
         <div className="brand">
-          <div className="logo">GS</div>
-          <div>
-            <h1>Grok Spot Desk</h1>
-            <p>Spot Binance · datos reales · capital pequeño</p>
-          </div>
+          <h1>Grok Spot Desk</h1>
+          <p>Spot Binance · guía local · datos reales · guardado en tu navegador</p>
         </div>
-        <div className="badge-live"><span className="dot" /> precios en vivo</div>
+        <div className="badge-live"><span className="dot" /> en vivo</div>
       </header>
 
       <div className="profile-bar">
@@ -523,25 +898,25 @@ export default function App() {
           <label>Capital operación ($)</label>
           <input type="number" min={5} step={1} value={capital} onChange={(e) => setCapital(+e.target.value || 0)} />
         </div>
-        <div className="field">
-          <label>Riesgo por trade (%)</label>
-          <input type="number" min={0.25} max={5} step={0.25} value={riskPct} onChange={(e) => setRiskPct(+e.target.value || 1)} />
-        </div>
-        <div className="field">
-          <label>Perfil</label>
-          <select value={riskProfile} onChange={(e) => setRiskProfile(e.target.value)}>
-            <option value="conservador">Conservador</option>
-            <option value="moderado">Moderado</option>
-            <option value="agresivo">Agresivo</option>
-          </select>
+        <div className="field" style={{ gridColumn: "span 2" }}>
+          <label>Riesgo por niveles</label>
+          <div className="risk-pills">
+            {Object.entries(RISK_LEVELS).map(([key, v]) => (
+              <button
+                key={key}
+                type="button"
+                className={`risk-pill ${riskLevel === key ? "active" : ""}`}
+                onClick={() => setRiskLevel(key)}
+              >
+                {v.label}
+                <small>{v.pct}% / trade</small>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="field">
           <label>Exchange</label>
           <input value="Binance Spot" readOnly />
-        </div>
-        <div className="field">
-          <label>Mínimo práctico</label>
-          <input value="~$5 – $15" readOnly />
         </div>
       </div>
 
@@ -550,7 +925,7 @@ export default function App() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && run()}
-          placeholder="BTC, ETH, SOL, LINK…"
+          placeholder="Busca cualquier cripto: BTC, SOL, un token nuevo…"
         />
         <button className="btn btn-primary" onClick={() => run()} disabled={loading}>
           {loading ? <RefreshCw size={16} className="spin" /> : <Search size={16} />}
@@ -563,22 +938,80 @@ export default function App() {
         ))}
       </div>
 
+      <div className="tabs">
+        <button className={`tab ${tab === "analizar" ? "active" : ""}`} onClick={() => setTab("analizar")}>Analizar</button>
+        <button className={`tab ${tab === "historial" ? "active" : ""}`} onClick={() => setTab("historial")}>
+          <History size={13} style={{ verticalAlign: "middle" }} /> Historial ({history.length})
+        </button>
+        <button className={`tab ${tab === "posiciones" ? "active" : ""}`} onClick={() => setTab("posiciones")}>
+          <Briefcase size={13} style={{ verticalAlign: "middle" }} /> Posiciones ({positions.length})
+        </button>
+      </div>
+
       {error && <div className="error"><AlertTriangle size={14} /> {error}</div>}
+
+      {tab === "historial" && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <h3><History size={14} /> Búsquedas guardadas</h3>
+          {!history.length && <div className="empty">Aún no hay búsquedas. Analiza una moneda.</div>}
+          {history.map((h) => (
+            <div className="list-row" key={h.id + h.at} onClick={() => run(h.symbol)}>
+              {h.image && <img src={h.image} alt="" />}
+              <div>
+                <div className="name">{h.symbol} · {h.name}</div>
+                <div className="sub">{fmt.date(h.at)}</div>
+              </div>
+            </div>
+          ))}
+          {!!history.length && (
+            <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={clearHistory}>Vaciar historial</button>
+          )}
+        </div>
+      )}
+
+      {tab === "posiciones" && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <h3><Briefcase size={14} /> Mis compras (rendimiento)</h3>
+          {!positions.length && <div className="empty">Registra una compra desde el análisis para ver el P&amp;L aquí.</div>}
+          {positions.map((p) => {
+            const pnlPct = p.lastPrice != null ? (p.lastPrice / p.entryPrice - 1) * 100 : null;
+            const pnlUsd = pnlPct != null ? p.usd * (pnlPct / 100) : null;
+            return (
+              <div className="list-row" key={p.at} onClick={() => run(p.symbol)}>
+                {p.image && <img src={p.image} alt="" />}
+                <div>
+                  <div className="name">{p.symbol} · {fmt.usd(p.usd)}</div>
+                  <div className="sub">Entrada {fmt.price(p.entryPrice)} · {fmt.date(p.at)}</div>
+                </div>
+                <div className="right">
+                  <div className={pnlPct != null && pnlPct >= 0 ? "pnl-up" : "pnl-down"}>
+                    {pnlPct == null ? "—" : fmt.pct(pnlPct)}
+                  </div>
+                  <div className="sub">{pnlUsd == null ? "" : fmt.usd(pnlUsd)}</div>
+                </div>
+                <button className="icon-btn" type="button" onClick={(e) => { e.stopPropagation(); removePosition(p.at); }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid">
         <div>
-          {loading && <div className="card loading"><RefreshCw className="spin" size={20} /> Analizando mercado y velas…</div>}
-          {!loading && !detail && (
-            <div className="card empty">Elige una moneda y pulsa Analizar. Empieza por BTC o ETH si tu capital es pequeño.</div>
+          {loading && <div className="card loading"><RefreshCw className="spin" size={20} /> Analizando…</div>}
+          {!loading && !detail && tab === "analizar" && (
+            <div className="card empty">Busca una cripto o pulsa un chip. Las nuevas también: escribe el nombre si está en CoinGecko/Binance.</div>
           )}
-          {!loading && detail && (
+          {!loading && detail && tab === "analizar" && (
             <div className="card">
               <div className="coin-head">
                 <div className="coin-id">
                   <img src={detail.image?.small} alt="" />
                   <div>
                     <h2>{detail.name} <span>{detail.symbol?.toUpperCase()}</span></h2>
-                    <div className="meta">Rank #{detail.market_cap_rank ?? "—"} · Spot research</div>
+                    <div className="meta">Rank #{detail.market_cap_rank ?? "—"}</div>
                   </div>
                 </div>
                 <div style={{ textAlign: "right" }}>
@@ -594,67 +1027,104 @@ export default function App() {
                     <div><strong>{score?.total}</strong><span>score</span></div>
                     <div><strong>{tech?.quality ?? "—"}</strong><span>técnico</span></div>
                     <div><strong>{tech?.lastRsi?.toFixed?.(0) ?? "—"}</strong><span>RSI</span></div>
+                    <div><strong>{signalConfidence(tech, score, riskLevel).pct}</strong><span>confianza</span></div>
                   </div>
                 </div>
               )}
               {verdict && <p style={{ color: "var(--muted)", fontSize: 13.5, marginBottom: 12 }}>{verdict.why}</p>}
+
+              {tech && verdict && (() => {
+                const timing = buildBuyTiming(tech, verdict, stop, displayPrice);
+                if (!timing) return null;
+                const cls = timing.color === "now" ? "v-buy" : timing.color === "scale" ? "v-scale" : timing.color === "no" ? "v-no" : "v-wait";
+                return (
+                  <div style={{ marginBottom: 14 }}>
+                    <h3><Target size={14} /> ¿Cuándo comprar y a qué precio?</h3>
+                    <div className="verdict" style={{ marginBottom: 10 }}>
+                      <span className={`verdict-tag ${cls}`}>{timing.momento}</span>
+                    </div>
+                    <p style={{ color: "var(--muted)", fontSize: 13.5, marginBottom: 10 }}>{timing.detalle}</p>
+                    <div className="stats">
+                      <div className="stat"><div className="lbl">Precio ahora</div><div className="val">{fmt.price(timing.precioActual)}</div></div>
+                      <div className="stat"><div className="lbl">Zona ideal</div><div className="val">{fmt.price(timing.zonaIdeal.min)} – {fmt.price(timing.zonaIdeal.max)}</div></div>
+                      <div className="stat"><div className="lbl">Zona aceptable</div><div className="val">{fmt.price(timing.zonaAceptable.min)} – {fmt.price(timing.zonaAceptable.max)}</div></div>
+                      <div className="stat"><div className="lbl">Stop</div><div className="val">{fmt.price(timing.stop)}</div></div>
+                      <div className="stat"><div className="lbl">TP1</div><div className="val">{fmt.price(timing.tp1)}</div></div>
+                      <div className="stat"><div className="lbl">TP2</div><div className="val">{fmt.price(timing.tp2)}</div></div>
+                      <div className="stat"><div className="lbl">TP3</div><div className="val">{fmt.price(timing.tp3)}</div></div>
+                      <div className="stat"><div className="lbl">Soporte</div><div className="val">{fmt.price(timing.soporte)}</div></div>
+                    </div>
+                    <p style={{ fontSize: 12, color: "var(--muted)" }}>{timing.condicion}</p>
+                  </div>
+                );
+              })()}
 
               <div className="stats">
                 <div className="stat"><div className="lbl">24h</div><div className={`val ${(md?.price_change_percentage_24h || 0) >= 0 ? "up" : "down"}`}>{fmt.pct(md?.price_change_percentage_24h)}</div></div>
                 <div className="stat"><div className="lbl">7d</div><div className={`val ${(md?.price_change_percentage_7d || 0) >= 0 ? "up" : "down"}`}>{fmt.pct(md?.price_change_percentage_7d)}</div></div>
                 <div className="stat"><div className="lbl">Market Cap</div><div className="val">{fmt.compact(md?.market_cap?.usd)}</div></div>
                 <div className="stat"><div className="lbl">Vol 24h</div><div className="val">{fmt.compact(md?.total_volume?.usd)}</div></div>
-                <div className="stat"><div className="lbl">Tendencia 1D</div><div className="val">{tech?.trend ?? "—"}</div></div>
+                <div className="stat"><div className="lbl">Tendencia</div><div className="val">{tech?.trend ?? "—"}</div></div>
                 <div className="stat"><div className="lbl">Soporte</div><div className="val">{fmt.price(tech?.support)}</div></div>
                 <div className="stat"><div className="lbl">vs ATH</div><div className="val">{fmt.pct(md?.ath_change_percentage?.usd)}</div></div>
                 <div className="stat"><div className="lbl">Dist. soporte</div><div className="val">{tech ? tech.distSup.toFixed(1) + "%" : "—"}</div></div>
               </div>
 
-              <h3><Activity size={14} /> Gráfico · SMA · RSI</h3>
-              <ChartBlock tech={tech} stop={stop} targets={tech ? [tech.res1, tech.res2, tech.res3] : null} />
+              <h3><Activity size={14} /> Gráfico · entrada marcada en dorado</h3>
+              <ChartBlock tech={tech} stop={stop} targets={tech ? [tech.res1, tech.res2, tech.res3] : null} entryMarks={entryMarks} />
+
+              <h3 className="section-gap"><Wallet size={14} /> Registré compra (se guarda)</h3>
+              <div className="buy-box">
+                <div className="field">
+                  <label>Precio entrada</label>
+                  <input value={buyPrice} onChange={(e) => setBuyPrice(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>USD comprados</label>
+                  <input value={buyUsd} onChange={(e) => setBuyUsd(e.target.value)} />
+                </div>
+                <button className="btn btn-buy btn-sm" type="button" onClick={registerBuy}>Registré compra</button>
+              </div>
 
               {tech && (
                 <>
-                  <h3 style={{ marginTop: 8 }}><Target size={14} /> Escenarios de precio</h3>
+                  <h3><Target size={14} /> Escenarios</h3>
                   <div className="scenarios">
                     <div className="sc up">
                       <div className="title"><TrendingUp size={14} /> Alcista</div>
                       <div className="row"><span>TP1</span><strong>{fmt.price(tech.res1)}</strong></div>
                       <div className="row"><span>TP2</span><strong>{fmt.price(tech.res2)}</strong></div>
                       <div className="row"><span>TP3</span><strong>{fmt.price(tech.res3)}</strong></div>
-                      <p>Si aguanta sobre el soporte y no se rompe la estructura.</p>
+                      <p>Si aguanta el soporte.</p>
                     </div>
                     <div className="sc">
                       <div className="title"><Shield size={14} /> Base</div>
                       <div className="row"><span>Rango</span><strong>{fmt.price(Math.min(tech.price, tech.support * 1.02))} – {fmt.price((tech.price + tech.res1) / 2)}</strong></div>
-                      <p>Consolidación / lateral. Normal si el mercado duda.</p>
+                      <p>Lateral / consolidación.</p>
                     </div>
                     <div className="sc down">
                       <div className="title"><TrendingDown size={14} /> Bajista</div>
                       <div className="row"><span>Soporte</span><strong>{fmt.price(tech.support)}</strong></div>
                       <div className="row"><span>Stop</span><strong>{fmt.price(stop)}</strong></div>
-                      <p>Si pierde el soporte con fuerza, sal o reduce.</p>
+                      <p>Si pierde soporte, reduce.</p>
                     </div>
                   </div>
                 </>
               )}
 
-              <h3><Wallet size={14} /> Cuánto comprar (tu plan)</h3>
-              {!plan && <p style={{ color: "var(--muted)", fontSize: 13 }}>Configura capital y analiza una moneda.</p>}
+              <h3><Wallet size={14} /> Plan de tamaño</h3>
               {plan?.tooSmall && <div className="error">{plan.msg}</div>}
               {plan && !plan.tooSmall && (
                 <>
                   <div className="stats">
-                    <div className="stat"><div className="lbl">Tamaño total</div><div className="val">{fmt.usd(plan.size)}</div></div>
+                    <div className="stat"><div className="lbl">Tamaño</div><div className="val">{fmt.usd(plan.size)}</div></div>
                     <div className="stat"><div className="lbl">Riesgo máx.</div><div className="val">{fmt.usd(plan.maxRisk)}</div></div>
                     <div className="stat"><div className="lbl">Stop</div><div className="val">{fmt.price(stop)}</div></div>
                     <div className="stat"><div className="lbl">Unidades</div><div className="val">{plan.units.toFixed(5)}</div></div>
                   </div>
                   <div className="tramos">
                     {plan.tramos.map((t, i) => (
-                      <div className="tramo" key={i}>
-                        <Wallet size={14} /> {t.label} <strong>{fmt.usd(t.usd)}</strong>
-                      </div>
+                      <div className="tramo" key={i}><Wallet size={14} /> {t.label} <strong>{fmt.usd(t.usd)}</strong></div>
                     ))}
                   </div>
                 </>
@@ -662,17 +1132,14 @@ export default function App() {
 
               <div className="warn">
                 <AlertTriangle size={14} />
-                <span>
-                  Escenarios técnicos, no promesas. La app no compra por ti. Crypto puede perder valor rápido.
-                  Opera solo en Binance Spot con dinero que puedas arriesgar.
-                </span>
+                <span>Escenarios técnicos, no promesas. No ejecuta órdenes. Los datos se guardan solo en este navegador (localStorage).</span>
               </div>
             </div>
           )}
         </div>
 
         <div className="card chat">
-          <h3><Bot size={14} /> Asistente</h3>
+          <h3><Bot size={14} /> Guía / chat (sin Gemini)</h3>
           <div className="chat-msgs">
             {msgs.map((m, i) => (
               <div key={i} className={`bubble ${m.role === "bot" ? "bot" : "me"}`}>
@@ -686,19 +1153,19 @@ export default function App() {
               value={chatIn}
               onChange={(e) => setChatIn(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && sendChat()}
-              placeholder="¿Cuánto compro con $10?"
+              placeholder="Pregunta libre sobre Spot, riesgo, stops…"
             />
             <button className="btn btn-primary" onClick={sendChat}><Send size={16} /></button>
           </div>
           <div className="quick-q">
-            {["¿Cuánto compro?", "¿Subirá o bajará?", "¿Dónde va el stop?", "¿Veredicto?"].map((q) => (
-              <button key={q} type="button" onClick={() => { setChatIn(q); }}>{q}</button>
+            {["¿Cómo empiezo?", "¿Cuándo comprar?", "Checklist", "¿Qué tan fiable?", "¿Cuánto compro?", "¿Dónde va el stop?"].map((q) => (
+              <button key={q} type="button" onClick={() => setChatIn(q)}>{q}</button>
             ))}
           </div>
         </div>
       </div>
 
-      <p className="footer">Grok Spot Desk · investigación Spot · no es asesoramiento financiero · no ejecuta trades</p>
+      <p className="footer">Grok Spot Desk · investigación Spot · no es asesoramiento financiero</p>
     </div>
   );
 }
