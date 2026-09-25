@@ -1,7 +1,7 @@
 {
   "name": "spot-desk",
   "private": true,
-  "version": "4.0.0",
+  "version": "6.0.0-fund",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -1,29 +1,18 @@
-# Spot Desk v4
+# Spot Desk v8.2
 
-Investigación Spot estilo Binance: velas OHLC, zoom/pan, zona de compra, stop/TP, tramos, posiciones, **cache de APIs**, **backtest simple** y **alertas de precio**.
+Mercado, fundamentos, noticias, **IA multi-turno**, watchlist en vivo, alertas, comparación y exportar ficha.
 
 ## Arranque
-
 ```bash
 npm install
 npm run dev
 ```
 
-## Estructura
+## IA
+1. Analiza un activo.
+2. **Config IA** → API key (xAI: console.x.ai).
+3. **Probar conexión**.
+4. Pregunta libremente (ej. «¿Puede subir SOL?»).
 
-```
-src/
-  App.jsx                 # UI
-  components/BinanceCandleChart.jsx
-  lib/
-    api.js                # Binance multi-host + CoinGecko + cache
-    indicators.js         # SMA/RSI/ATR + backtest
-    signal.js             # score, veredicto, plan, venta
-    store.js              # localStorage + notificaciones
-    chat.js               # guía local
-    fmt.js
-```
-
-## Aviso
-
-No ejecuta órdenes. El backtest es simulación histórica, no predicción. No es asesoramiento financiero.
+La memoria del chat guarda los últimos turnos. Noticias priorizan el símbolo analizado.
+Alertas solo con la pestaña abierta.
