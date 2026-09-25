@@ -341,8 +341,8 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="brand">
-          <h1>Spot Desk</h1>
-          <p>Mercado · fundamentos · noticias · IA · alertas · comparación</p>
+          <h1>Spot Desk · Black</h1>
+          <p>Fondo negro · fundamentos · noticias · IA</p>
         </div>
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => boot()} disabled={loading}>
           <RefreshCw size={14} className={loading ? "spin" : ""} /> Actualizar
