@@ -326,3 +326,46 @@ a:hover { text-decoration: underline; }
   .app { padding: 12px 10px 48px; }
   .price-big { font-size: 20px; }
 }
+
+
+.side-love {
+  position: fixed;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: translateY(-50%) rotate(180deg);
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0.9;
+}
+.side-love p {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: #f0b90b;
+  text-transform: lowercase;
+}
+.side-love-sub {
+  margin-top: 10px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #848e9c !important;
+  letter-spacing: 0.08em !important;
+}
+@media (max-width: 1100px) {
+  .side-love {
+    position: static;
+    writing-mode: horizontal-tb;
+    transform: none;
+    text-align: center;
+    margin-bottom: 12px;
+    padding: 10px;
+    border: 1px solid #222;
+    border-radius: 12px;
+    background: #0a0a0a;
+  }
+  .side-love-sub { margin-top: 4px !important; }
+}

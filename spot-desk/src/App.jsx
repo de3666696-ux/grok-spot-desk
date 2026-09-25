@@ -339,6 +339,10 @@ export default function App() {
 
   return (
     <div className="app">
+      <aside className="side-love" aria-label="mensaje">
+        <p>te amo yirbelys</p>
+        <p className="side-love-sub">por un futuro mejor</p>
+      </aside>
       <header className="header">
         <div className="brand">
           <h1>Spot Desk · Black</h1>
